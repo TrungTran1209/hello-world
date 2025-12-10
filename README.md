@@ -391,5 +391,394 @@ def find_reachable_byBDD(net: PetriNet):
         New_States = really_new_states # Cập nhật Frontier
 
     return Reachable
+```
+## 📕 Module: `deadlock_detection_by_ILP_BDD.py`
+Module này thực hiện **Task 4: Phát hiện và lựa chọn deadlock marking tốt nhất**. <br>
+Phương pháp: Kết hợp **Symbolic Reachability bằng Binary Decision Diagram (BDD) (Task 3)** và tối ưu hóa bằng **Integer Linear Programming (ILP – Gurobi)** <br>
+<br>
+Import các thư viện hỗ trợ và các module khác:
+```python
+import gurobipy as gp
+from gurobipy import GRB
+from dd.autoref import BDD
+from petrinet_model import PetriNet
+from find_reachable_byBDD import find_reachable_byBDD, bdd_and, bdd_or
+```
+### THUẬT TOÁN CHÍNH + Comment giải thích
+```python
+def check_deadlock(net, reachable_bdd, manager):
+    """
+    Task 4: Tìm Deadlock dùng BDD và ILP guropy.
+    Sử dụng BDD cho reachabbility và ILP cho deadlock detection.
+    Trả về dictionary {place_id: 1/0} giống format của ILP solver.
+    """
+    print("\n------ Start Deadlock Detection -------")
+
+    # 1. Khai báo biến BDD (giống Task 3)
+    place_ids = sorted(list(net.places.keys()))
+    v = {p_id: manager.var(p_id) for p_id in place_ids}
+
+    # 2. Xây dựng điều kiện Deadlock
+    # Logic: t bị Disable nếu (p1=0) HOẶC (p2=0)... (Chỉ cần thiếu 1 cái là tạch)
+    # ∀t ∈ T: ∑ M(p) ≤ |*t| - 1  (tương đương: có ít nhất 1 input place không có token)
+
+    disabled_conditions = []
+
+    for t_id in net.transitions.keys():
+        pre_places = net.pre[t_id]
+
+        # Nếu transition nguồn (không cần input) -> Luôn chạy -> Không bao giờ Dead
+        if not pre_places:
+            return None
+
+        # FORMULATION: ∑ M(p) ≤ |*t| - 1 
+        # Trong BDD: Có ít nhất 1 input place KHÔNG có token
+        # => OR( NOT M(p) ) for p in *t
+        disable_terms = [~v[p] for p in pre_places]  # place p ko có token -> p=0
+        trans_disabled = bdd_or(manager, disable_terms)
+        disabled_conditions.append(trans_disabled)
+
+    if not disabled_conditions:
+        # Không có transition nào -> Không có deadlock
+        print("No transitions in the net with input place so cannot have deadlock.")
+        return None
+
+    # Trạng thái Dead = TẤT CẢ transition đều bị disable
+    is_dead_bdd = bdd_and(manager, disabled_conditions)
+
+    # VERIFICATION: Giao với tập reachable từ BDD Task 3
+    # M_dead ∈ R_BDD (tránh deadlock giả)
+    deadlock_candidates_bdd = reachable_bdd & is_dead_bdd
+
+    if deadlock_candidates_bdd == manager.false:
+        print("No deadlock found.")
+        return None
+    
+    # 3. Lấy các deadlock candidates từ BDD để kiểm tra bằng ILP
+    candidate_markings = []
+    current_bdd = deadlock_candidates_bdd
+
+    # Lấy tất cả các marking trong deadlock_candidates_bdd
+    candidate_count = 0
+    max_iterations = 1000  # Giới hạn số lượng để tránh quá tải
+
+    while current_bdd != manager.false and candidate_count < max_iterations:
+        # Lấy 1 marking từ BDD
+        marking = manager.pick(current_bdd)
+        candidate_markings.append(marking) 
+        candidate_count += 1
+
+        # Tạo điều kiện để loại bỏ marking này khỏi BDD
+        # Tạo BDD cho marking cụ thể này để loại bỏ
+        marking_bdd = manager.true
+        for p_id in place_ids:
+            if marking.get(p_id, False):
+                marking_bdd &= v[p_id]
+            else:
+                marking_bdd &= ~v[p_id]
+        
+        # Loại bỏ marking này
+        current_bdd &= ~marking_bdd
+    
+    if (candidate_count >= max_iterations):
+        print(f"Warning: Reached maximum candidate extraction limit of {max_iterations}.")
+
+    if (not candidate_markings):
+        print("No deadlock found after extraction.")
+        return None
+    
+    # Sắp xếp lại candidate markings để ưu tiên các marking có nhiều token hơn
+    candidate_markings.sort(key=lambda m: sum(1 for p in place_ids if m.get(p, False)), reverse=True)
+    
+    # 4. Kiểm tra từng marking bằng ILP
+    try:
+        # Tạo model ILP bằng guropy
+        model = gp.Model("deadlock_detection")
+        model.setParam('OutputFlag', 0)  # Tắt output của guropy
+
+        # Tạo biến quyết định cho TẤT CẢ candidate markings
+        marking_vars = {}
+        for i in range(len(candidate_markings)):
+            marking_vars[i] = model.addVar(vtype=GRB.BINARY, name=f"select_marking_{i}")
+
+        # Ràng buộc: Chỉ chọn 1 marking
+        model.addConstr(gp.quicksum(marking_vars.values()) == 1, "Select_One_Marking")
+
+        # Mục tiêu: tối đa hóa số token
+        objective_terms = []
+
+        # Nếu có weight cho places, dùng nó
+        # Nếu ko có, dùng token làm mục tiêu
+
+        use_weights = hasattr(list(net.places.values())[0], 'weight')
+        
+        if use_weights:
+            # Tối ưu theo WEIGHT (nếu có)
+            weights = {p_id: getattr(net.places[p_id], 'weight', 0) for p_id in place_ids}
+            print("Using WEIGHTS for optimization objective")
+        else:
+            # Tối ưu theo SỐ TOKEN
+            weights = {p_id: 1 for p_id in place_ids}  # Mỗi token = 1 điểm
+            print("Using TOKEN COUNT for optimization objective")
+        
+        for i, marking in enumerate(candidate_markings):
+            # Tính điểm cho marking này
+            score = 0
+            for p_id in place_ids:
+                if marking.get(p_id, False):
+                    score += weights[p_id]
+            objective_terms.append(score * marking_vars[i])
+
+        # Đặt hàm mục tiêu
+        model.setObjective(gp.quicksum(objective_terms), GRB.MAXIMIZE)
+        
+        # Giải ILP
+        model.optimize()
+
+        # Kiểm tra kết quả
+        if model.status == GRB.OPTIMAL:
+            # Lấy marking được chọn
+            for i, var in marking_vars.items():
+                if var.X > 0.5:
+                    selected_marking = candidate_markings[i]
+                    
+                    # Chuyển sang định dạng {place_id: 1/0}
+                    deadlock_marking = {}
+                    total_score = 0  # Tổng weight nếu có
+                    for p_id in place_ids:
+                        has_token = selected_marking.get(p_id, False)
+                        deadlock_marking[p_id] = 1 if has_token else 0
+                        if has_token:
+                            total_score += weights[p_id]
+
+                    # In kết quả
+                    print("\nDEADLOCK MARKING:")
+
+                    # In tất cả places theo nhóm
+                    all_places_sorted = sorted(place_ids)
+                    places_per_line = min(15, len(all_places_sorted))  # Số places mỗi dòng
+
+                    for i in range(0, len(all_places_sorted), places_per_line):
+                        chunk = all_places_sorted[i:i + places_per_line]
+                        
+                        # Dòng tên places
+                        places_str = " ".join([f"{p:>4}" for p in chunk])
+                        print(f"Place: {places_str}")
+                        
+                        # Dòng giá trị tokens
+                        values_str = " ".join([f"{deadlock_marking.get(p, 0):>4}" for p in chunk])
+                        print(f"Token: {values_str}")
+                        print()
+
+                    # Chỉ ra deadlock ở đâu
+                    places_with_token = sorted([p for p in all_places_sorted if deadlock_marking.get(p, 0) == 1])
+                    print("-" * 50)
+
+                    if places_with_token:
+                        # In thành nhiều dòng nếu nhiều places
+                        places_str = ""
+                        for i in range(0, len(places_with_token), 10):
+                            chunk = places_with_token[i:i + 10]
+                            places_str += ", ".join(chunk)
+                            if i + 10 < len(places_with_token):
+                                places_str += "\n" + " " * 22
+                        
+                        print(f"Deadlock at token=1 places: {places_str}")
+                    else:
+                        print("Deadlock: Empty marking (all places = 0)")
+
+                    print("-" * 50)
+
+
+                    return deadlock_marking
+
+        else:
+            print("No optimal solution found in ILP.")
+            return None
+    
+    except gp.GurobiError as e:
+        print("Gurobi Error:", e)
+        return None
+```
+## 📕 Module: `optimization.py`
+Module này thực hiện **Task 5: Optimization bằng phương pháp Cutting plane (BDD and ILP Gurobi).**
+<br>
+**Hiện thực**: 
+<br>
+ Tối ưu hóa marking dưới ràng buộc reachability, bằng cách kết hợp:
+* **ILP(Gurobi)** để tìm tối ưu marking theo weight.
+* **BDD** để xác minh marking có thực sự là reachable.
+* **Cut Generation (Iterative Refinement)** để loại bỏ nghiệm sai.
+
+```python
+# Import các thư viện hỗ trợ 
+import time
+import gc
+from typing import Dict, Tuple, Optional
+```
+**Các hàm hỗ trợ + Comment giải thích:**
+```python
+def build_incidence(net):
+    """
+    Xây dựng ma trận incidence C cho Petri net.
+    - Với mỗi cặp (place p, transition t), ta xác định:
+        pre(p,t)  = 1 nếu p là đầu vào của t, ngược lại 0
+        post(p,t) = 1 nếu p là đầu ra của t, ngược lại 0
+    - Giá trị C[(p, t)] = post(p, t) - pre(p, t)
+        +1: firing t tạo token vào p
+        -1: firing t tiêu thụ token từ p
+         0: t không ảnh hưởng p
+    Hàm trả về dictionary C dùng trong phương trình trạng thái của ILP:
+        m = m0 + C * y
+    """
+    C = {}
+    for p_id in net.places:
+        for t_id in net.transitions:
+            # post(p,t) = 1 nếu transition t tạo token cho p
+            post = 1 if p_id in net.post.get(t_id, set()) else 0
+            # pre(p,t) = 1 nếu transition t tiêu thụ token từ p
+            pre = 1 if p_id in net.pre.get(t_id, set()) else 0
+            C[(p_id, t_id)] = post - pre
+    return C
+
+
+def create_cube(manager, marking: Dict[str, int]):
+    """
+    Tạo một BDD 'cube' (biểu diễn đúng một trạng thái duy nhất) từ marking.
+    - Marking là dict dạng: {place: 0/1}
+    - BDD cube được dùng để kiểm tra reachability:
+          reachable_bdd & cube != False  → marking reachable
+
+    Vì một số backend BDD có thể yêu cầu dict phải 'sạch', hàm này thử:
+        1. Tạo cube trực tiếp
+        2. Nếu lỗi: tạo dict copy rồi thử lại
+        3. Nếu vẫn lỗi: trả về None để xử lý bên ngoài
+    """
+    try:
+        # thử tạo cube trực tiếp từ marking
+        return manager.cube(marking)
+    except Exception:
+        try:
+            # fallback: tạo bản sao dict để tránh lỗi reference
+            return manager.cube({p: marking[p] for p in marking})
+        except Exception:
+            # không thể tạo cube
+            return None
 
 ```
+**THUẬT TOÁN CHÍNH + COMMENT:**
+```python
+def optimize_reachability(net, reachable_bdd, manager,
+                          max_iter: int = 1000,
+                          y_ub: Optional[int] = None
+                          ) -> Tuple[Optional[Dict[str, int]], int, float, int]:
+    """
+    Tối ưu trên tập reachability bằng ILP + BDD verification + cắt loại nghiệm sai.
+    Thuật toán:
+        1. Giải ILP để tìm marking M* có tổng trọng số lớn nhất.
+        2. Kiểm tra M* có reachable trong BDD hay không.
+        3. Nếu không reachable → thêm ràng buộc cắt (spurious cut) để loại bỏ M*.
+        4. Lặp lại cho đến khi:
+            - Tìm được marking reachable tối ưu, hoặc
+            - Hết lượt lặp.
+
+    Trả về:
+        (marking_tối_ưu, giá_trị_mục_tiêu, thời_gian, số_lượt_lặp)
+    """
+
+    start_time = time.time()
+
+    # Danh sách place và transition được sắp theo thứ tự cố định
+    place_ids = sorted(net.places)
+    trans_ids = sorted(net.transitions)
+
+    # Trọng số w(p) của mỗi place (do người dùng gán từ PNML)
+    weights = {p: getattr(net.places[p], "weight", 0) for p in place_ids}
+
+    # Marking ban đầu: 1 token nếu p nằm trong initial_marking
+    m0 = {p: 1 if p in net.initial_marking else 0 for p in place_ids}
+
+    # Ma trận incidence C(p,t)
+    C = build_incidence(net)
+
+    # Giới hạn trên cho số lần firing của transition
+    if y_ub is None:
+        y_ub = max(1, len(place_ids))
+
+    # Khởi tạo mô hình ILP bằng Gurobi
+    model = gp.Model("opt_over_reachable")
+    model.Params.OutputFlag = 0    # tắt log
+    model.Params.MIPGap = 0        # yêu cầu nghiệm tối ưu toàn cục
+
+    # Biến marking nhị phân m_p ∈ {0,1}
+    m_vars = {p: model.addVar(vtype=GRB.BINARY, name=f"m_{p}") for p in place_ids}
+
+    # Biến firing count y_t ∈ [0, y_ub], nguyên
+    y_vars = {t: model.addVar(vtype=GRB.INTEGER, lb=0, ub=y_ub, name=f"y_{t}") for t in trans_ids}
+
+    # Mục tiêu: maximize Σ w(p) * m_p
+    model.setObjective(gp.quicksum(weights[p] * m_vars[p] for p in place_ids), GRB.MAXIMIZE)
+
+    # Phương trình trạng thái Petri net:
+    #     m_p = m0_p + Σ C(p,t) * y_t
+    for p in place_ids:
+        model.addConstr(
+            m_vars[p] == m0[p] + gp.quicksum(C[(p, t)] * y_vars[t] for t in trans_ids),
+            name=f"state_eq_{p}"
+        )
+
+    iterations = 0
+    added_cuts = 0
+
+    # === Vòng lặp chính: ILP + BDD + Cut Generation ===
+    while iterations < max_iter:
+        iterations += 1
+        model.optimize()
+
+        # Nếu ILP không tìm được nghiệm → thoát
+        if model.Status != GRB.OPTIMAL:
+            duration = time.time() - start_time
+            gc.collect()
+            return None, 0, duration, iterations
+
+        # M* là marking từ nghiệm ILP
+        M_star = {p: 1 if m_vars[p].X >= 0.5 else 0 for p in place_ids}
+        obj_val = sum(weights[p] * M_star[p] for p in place_ids)
+
+        # Tạo cube BDD tương ứng để kiểm tra reachability
+        cube_bdd = create_cube(manager, M_star)
+
+        # reachable nếu: reachable_bdd ∧ cube != False
+        is_reachable = (cube_bdd is not None) and ((reachable_bdd & cube_bdd) != manager.false)
+
+        # Nếu marking là reachable → trả về nghiệm tối ưu
+        if is_reachable:
+            duration = time.time() - start_time
+            gc.collect()
+            return M_star, obj_val, duration, iterations
+
+        # === Nếu marking KHÔNG reachable → tạo “spurious cut” ===
+        added_cuts += 1
+
+        # Tách place có token và không có token
+        ones = [p for p, val in M_star.items() if val == 1]
+        zeros = [p for p, val in M_star.items() if val == 0]
+
+        # RHS đảm bảo nghiệm này bị loại nhưng không loại các nghiệm hợp lệ khác
+        rhs = max(0, len(ones) - 1)
+
+        # Ràng buộc cắt:
+        #     Σ m_p (p∈ones) − Σ m_p (p∈zeros) ≤ RHS
+        lhs = gp.quicksum(m_vars[p] for p in ones) - gp.quicksum(m_vars[p] for p in zeros)
+
+        model.addConstr(lhs <= rhs, name=f"cut_spurious_{added_cuts}")
+
+    # Nếu hết lượt lặp mà không tìm ra marking reachable
+    duration = time.time() - start_time
+    gc.collect()
+    return None, 0, duration, iterations
+
+```
+
+
+
