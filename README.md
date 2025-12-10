@@ -29,10 +29,8 @@ pip install -r requirements.txt
     * Phân tích (Parse) file PNML và kiểm tra tính nhất quán.
     * Tìm không gian trạng thái bằng thuật toán BFS (Task 2).
     * Tìm không gian trạng thái bằng thuật toán BDD (Task 3).
-    * So sánh kết quả (số lượng trạng thái) và thời gian và bộ nhớ chạy giữa hai phương pháp.
-    * Tìm Deadlock của mạng PetriNet bằng cách kết hợp BDD và ILP (Task 4).
-    * Tối ưu hóa hàm mục tiêu trên tập trạng thái đạt tới bằng cách kết hợp BDD và ILP (Task 5).
-    * Báo cáo thời gian chạy cho việc tìm deadlock và tối ưu hóa hàm mục tiêu trên các mô hình mẫu.
+    * So sánh kết quả (số lượng trạng thái) và thời gian chạy giữa hai phương pháp.
+    * Tìm kiếm trạng thái deadlock bằng BDD và ILP (Task 4).
 # 📂 Cấu trúc Dự án
 
 Mã nguồn được chia thành các module biệt lập để dễ quản lý và bảo trì:
@@ -41,11 +39,12 @@ Mã nguồn được chia thành các module biệt lập để dễ quản lý 
 * `petrinet_model.py`: Định nghĩa các lớp dữ liệu (`Place`, `Transition`, `Arc`, `PetriNet`) và chứa logic kiểm tra tính nhất quán (`verify_consistency`).
 * `parse_pnml.py`: Chứa hàm xử lý đọc file XML (`.pnml`) và chuyển đổi thành đối tượng `PetriNet`.
 * `find_reachable_byBFS.py`: Cài đặt thuật toán tìm kiếm theo chiều rộng (BFS) để tính toán không gian trạng thái một cách tường minh (Task 2).
-* `find_reachable_byBDD.py`: Cài đặt thuật toán tính toán tượng trưng sử dụng Binary Decision Diagrams (BDD) với thư viện `pyeda` (Task 3).
+* `find_reachable_byBDD.py`: Cài đặt thuật toán tính toán tượng trưng sử dụng Binary Decision Diagrams (BDD) với thư viện `DD` (Task 3).
 * `file.pnml`: File dữ liệu đầu vào mẫu (Mạng Petri).
+* `deadlock_detection_by_ILP_BDD.py`: Cài đặt thuật toán xác định deadlock sử dụng ILP của thư viện guropy (Task 4)
+* `optimization.py`: Cài đặt thuật toán để Optimized mạng Petri (Task 5)
 * `generate_pnml.py`: File tạo sinh ra Mạng Petri ngẫu nhiên và lưu vào trong folder `/testcase` với chỉ mục tự động
-* `deadlock_detection_by_ILP_BDD.py` : Cài đặt logic phát hiện `Deadlock` bằng cách sử dụng kết hợp `BDD` và `ILP` (Task 4). 
-* `optimization.py` : Thuật toán tối ưu hóa hàm mục tiêu trên tập trạng thái đạt được, kết hợp `BDD` và `ILP` cùng phương pháp `Cut Generation` (Task 5).
+* `test.py`: File tìm tất cả test được chứa trong `/testcase` và chạy 5 task với output được làm đẹp (task 4 vẫn chưa được format)
 # ✨ Các tính năng đã thực hiện
 
 * **Task 1: PNML Parsing**
@@ -59,14 +58,16 @@ Mã nguồn được chia thành các module biệt lập để dễ quản lý 
     * Mã hóa trạng thái và chuyển tiếp bằng biến Boolean.
     * Sử dụng thư viện `pyeda` để tính toán điểm bất động (Fixed-point iteration).
     * Tối ưu hóa tính toán trên không gian trạng thái lớn.
-* **Task 4: Deadlock Detection (BDD + ILP)**
-    * Sử dụng BDD để biểu diễn tập hợp các Marking $M_{dead}$ trong đó tất cả các Transition đều bị Disable (Dead Condition).
-    * Lấy giao của tập trạng thái Dead và tập Reachable đã tính ở Task 3: $C_{dead} = M_{dead} \cap Reach(M_0)$ làm tập ứng viên.
-    * Sử dụng Gurobi để chọn Marking tối ưu nhất (ví dụ: tối đa hóa tổng số token/weight) từ các ứng cử viên $C_{dead}$.
-* **Task 5: Optimization Over Reachable Marking (BDD + ILP + Cut Generation)**
-    * `Mô hình ILP cơ bản`: Xây dựng mô hình tối ưu hóa ILP (sử dụng Gurobi) để tối đa hóa hàm mục tiêu tuyến tính $c^T M$.
-    * `Ràng buộc Phương trình Trạng thái`: Thêm ràng buộc $M = M_0 + C \cdot Y$ (State Equations) vào mô hình ILP.
-    * `Sử dụng Cut Generation`: Thực hiện vòng lặp Cut Generation (sinh ra ràng buộc) để kiểm tra tính Reachability của giải pháp tối ưu $M^*$ bằng BDD. Nếu không đạt được, thêm một cắt (cut) vào ILP để loại bỏ nó và lặp lại.
+* **Task 4: Deadlock Detection (BDD and ILP Gurobi)**
+    * BDD Phase: Tìm tập marking thỏa mãn điều kiện deadlock
+    * Verification: Giao với tập reachable từ Task 3 (tránh spurious solutions)
+    * ILP Phase: Sử dụng Gurobi để chọn deadlock tối ưu (nhiều token nhất)
+* **Task 5: Optimization bằng phương pháp Cutting plane (BDD and ILP Gurobi)**
+    * ILP formulation để tìm solution candidate
+    * BDD verification để kiểm tra reachability
+    * Cut generation để loại bỏ spurious solutions
+    * Iterative refinement cho đến khi tìm được optimal valid solution
+
 ## 📘 Module: `petrinet_model.py`
 
 Module này đóng vai trò là **xương sống (backbone)** của toàn bộ dự án. Nó định nghĩa các cấu trúc dữ liệu cốt lõi để biểu diễn một mạng Petri trong bộ nhớ máy tính.
@@ -390,37 +391,5 @@ def find_reachable_byBDD(net: PetriNet):
         New_States = really_new_states # Cập nhật Frontier
 
     return Reachable
+
 ```
-## 💻 Module: `deadlock_detection_by_ILP_BDD.py` (Task 4)
-
-Module này thực hiện **Phát hiện Deadlock** bằng phương pháp tích hợp **BDD** (Symbolic Reachability) và **Integer Linear Programming (ILP)** (Tối ưu hóa lựa chọn).
-
-### Mục tiêu
-Tìm kiếm một *Deadlock Marking* ($M_{dead}$) **duy nhất** có thể đạt được từ trạng thái ban đầu ($M_{dead} \in$ Reach($M_0$)) và tối ưu hóa việc chọn Marking có trọng số (hoặc số token) cao nhất. 
-
-### 1. Xây dựng Điều kiện Deadlock (BDD Logic)
-
-Thuật toán sử dụng BDD để xác định tập hợp các trạng thái Dead và giao với tập Reachable BDD (Reach($M_0$)).
-
-* **Logic:** Một Marking $M$ là *dead* nếu **tất cả** các Transition $t$ đều bị Disable.
-* **Mã hóa:** Với mạng 1-safe, $t$ bị Disable nếu có **ít nhất một** Place đầu vào ($\bullet t$) không có token (tức là $\bigvee_{p \in \bullet t} \neg M(p)$).
-* **Xác định Ứng cử viên (Candidates):** Tính giao của tập trạng thái Dead ($M_{dead}$) và tập Reachable ($Reach(M_0)$) từ Task 3 để loại bỏ các Marking chết giả:
-    ```python
-    deadlock_candidates_bdd = reachable_bdd & is_dead_bdd
-    ```
-
-### 2. Lựa chọn Marking tối ưu (ILP Optimization)
-
-#### Trích xuất Ứng cử viên
-* Module duyệt qua `deadlock_candidates_bdd` và sử dụng hàm `manager.pick()` để trích xuất một số lượng giới hạn các Marking thực tế ($M \in C_{dead}$) để chuyển sang ILP.
-
-#### Mô hình ILP
-* Sử dụng Gurobi (ILP) để tạo mô hình lựa chọn, nơi mỗi Marking ứng cử viên là một biến nhị phân (`select_marking_i`).
-* **Ràng buộc:** Bắt buộc **chỉ chọn 1 Marking** (`Select_One_Marking`).
-* **Hàm Mục tiêu:** Tối đa hóa tổng trọng số (hoặc tổng số token) của Marking được chọn.
-
-```python
-# Ràng buộc: Chỉ chọn 1 marking
-model.addConstr(gp.quicksum(marking_vars.values()) == 1, "Select_One_Marking")
-# Mục tiêu: tối đa hóa số token/weight
-model.setObjective(gp.quicksum(objective_terms), GRB.MAXIMIZE)
